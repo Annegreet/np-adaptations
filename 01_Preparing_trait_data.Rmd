@@ -1,0 +1,204 @@
+---
+title: "01-preparing-trait-data"
+output: html_document
+date: "2025-12-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r data-prep}
+## Load packages
+if (!require(tidyverse)) install.packages("tidyverse")
+if (!require(readxl)) install.packages("readxl")
+if (!require(TNRS)) install.packages("TNRS")
+if (!require(GIFT)) remotes::install_github("https://github.com/BioGeoMacro/GIFT",
+                        dependencies = TRUE)
+if (!require(rnaturalearth)) install.packages("rnaturalearth")
+if (!require(rnaturalearthdata)) install.packages("rnaturalearthdata")
+if (!require(sf)) install.packages("sf")
+if (!require(dggridR)) install.packages("dggridR")
+if (!require(easystats)) install.packages("easystats", dependencies = TRUE)
+if (!require(viridis)) install.packages("viridis")
+if (!require(ggeffects)) install.packages("ggeffects")
+if (!require(effects)) install.packages("effects")
+if (!require(patchwork)) install.packages("patchwork")
+
+## load data
+# Globnut species
+dir <- "C:/Users/3768651/OneDrive - Universiteit Utrecht/Documents/Data/"
+spec <- read.csv(paste0(dir,"Globnut_offline/_GLOBNUT1.0/GlobNut1.0_species.csv")) %>% 
+  mutate(species_new = word(species_new, 1,2)) %>% 
+  mutate(genus_new = word(species_new, 1)) %>% 
+  filter(vascular_plant == 1) %>% 
+  filter(!family_new == "") %>% 
+  filter(!species_new == "") %>% 
+  group_by(family_new, genus_new, species_new) %>% 
+  summarise(nobs = n_distinct(plot_ID)) 
+fungalroot <- read_xlsx(paste0(dir,
+                              "FungalRoot/nph16569-sup-0002-tabless1-s4.xlsx"),
+                        sheet = 3, skip = 2)
+werner <- read_xlsx(paste0(dir,"Werner_Traits/pnas.1721629115.sd01.xlsx"))
+werner <- werner %>% 
+  mutate(species_orig = str_replace(species, pattern = "_", 
+                               replacement = " ")) %>% 
+  dplyr::select(species_orig, parasite, nfix, carnivory, cluster)
+nodb <- read_xlsx(paste0(dir, "NodDB/NodDB database v1.3b.xlsx"), 
+                  skip = 1, sheet = 1)
+
+## Download and prepare GIFT
+# trait_meta <- GIFT_traits_meta()
+# gift_raw <- GIFT_traits(trait_IDs = c("1.5.1","4.10.1", "4.5.1"))
+# # harmonize nomeclature
+# gift <- gift_raw %>% 
+#   dplyr::select(species_orig = work_species, parasite = trait_value_1.5.1, carnivory = trait_value_4.10.1, nfix = trait_value_4.5.1)
+# saveRDS(gift, "outputs/GIFT_traits.rds")
+gift <- readRDS("outputs/GIFT_traits.rds")
+```
+
+```{r}
+# gift <- readRDS("outputs/GIFT_traits.rds")
+# gift_harm <- TNRS(unique(gift$species_orig), sources = c("wfo"))
+# saveRDS(gift_harm, "outputs/TNRS/GIFT_harmonization.rds")
+gift_harm <- readRDS("outputs/TNRS/GIFT_harmonization.rds")
+gift_names <- gift_harm %>% 
+  filter(!Accepted_name == "") %>% # no name found, so no taxonomy
+  dplyr::select(Name_submitted, species = Accepted_species, 
+                family = Accepted_family) %>% 
+  mutate(genus = word(species, 1)) %>% 
+  filter(!species == ""| is.na(species)) 
+gift <- gift %>% 
+  left_join(gift_names, by = c("species_orig" = "Name_submitted"))  %>% 
+  select(-species_orig) %>% 
+  group_by(species) %>% 
+  # duplicate arrise due to name harmonization 
+  summarise(nfix = paste(na.omit(unique(nfix)), collapse = ", "),
+          carnivory = paste(na.omit(unique(carnivory)), collapse = ", "),
+          parasite = paste(na.omit(unique(parasite)), collapse = ", ")) %>% 
+  # remove duplicate rows with ambiguous trait info
+  filter(!nfix == "no, yes") %>% 
+  filter(parasite %in% c("independent, obligatory", "independent, obligatory, facultative",  "obligatory, independent", "independent, facultative"))
+
+## Prepare werner
+# werner_harm <- TNRS(unique(werner$species_orig), sources = c("wfo"))
+# saveRDS(werner_harm, "outputs/TNRS/werner_harmonization.rds")
+werner_harm <- readRDS("outputs/TNRS/werner_harmonization.rds")
+werner_names <- werner_harm %>% 
+  filter(!Accepted_name == "") %>% # no name found, so no taxonomy
+  dplyr::select(Name_submitted, species = Accepted_species, 
+                family = Accepted_family) %>% 
+  mutate(genus = word(species, 1)) %>% 
+  filter(!species == ""| is.na(species)) %>% 
+  as_tibble()
+werner <- werner %>% 
+  left_join(werner_names, by = c("species_orig" = "Name_submitted")) %>% 
+  select(-species_orig) %>% 
+  distinct()
+
+## Prepare Nodb
+# nodb_harm <- TNRS(nodb$genus, sources = "wfo")
+# saveRDS(nodb_harm,"outputs/TNRS/nodb_harmonization.rds")
+nodb_harm <- readRDS("outputs/TNRS/nodb_harmonization.rds")
+nodb <- nodb %>% 
+  left_join(nodb_harm[,c("Name_submitted", "Accepted_name")], 
+            by = c("genus" = "Name_submitted")) %>% 
+  # harmonisation merges genera, creating duplicates for consensus column, check if conflicts arise
+  group_by(Accepted_name) %>% 
+  summarise(nfix = paste(unique(`Consensus estimate`), collapse = ", "),
+            n = n_distinct(`Consensus estimate`)) %>%  #used to check for conflicts
+  # Zygia has conflict between consensus estimates, chose likely_Rhizobia instead of None, n studies is highest for this
+  mutate(nfix = case_match(nfix, "Rhizobia, None"~ "likely_Rhizobia",
+                                "Rhizobia, likely_Rhizobia" ~ "likely_Rhizobia",
+                                "None, unlikely_Rhizobia" ~ "unlikely_Rhizobia",
+                                "likely_present, Present" ~ "likely_present",
+                                "likely_Rhizobia, Rhizobia" ~ "likely_Rhizobia",
+                                .default = nfix)) %>% 
+  dplyr::select(Accepted_name, nfix) %>% 
+  filter(!Accepted_name == ""| is.na(Accepted_name)) %>% 
+  distinct()
+
+## Prepare Mycorrhiza 
+# funroot_harm <- TNRS(fungalroot$Genus, sources = "wfo")
+# saveRDS(funroot_harm, "outputs/TNRS/fungalroot_harmonization.rds")
+funroot_harm <- readRDS("outputs/TNRS/fungalroot_harmonization.rds")
+funroot_names <- funroot_harm %>% 
+  filter(!Accepted_name == "") %>% # no name found, so no taxonomy
+  dplyr::select(Name_submitted, genus = Accepted_name, 
+                family = Accepted_family) %>% 
+  filter(!genus == "") %>% 
+  as_tibble() 
+fungalroot <- fungalroot %>% 
+  left_join(funroot_names, by = c("Genus" = "Name_submitted")) %>% 
+  distinct()
+
+
+## Compile to one data set
+# check GIFt first then supplement by Werner
+cat_traits <- spec %>% 
+  left_join(gift, by = c("species_new" = "species")) %>% 
+  left_join(werner, by = c("species_new" = "species"), 
+            suffix = c("_gift","_werner")) %>% 
+  left_join(nodb, by = c("genus_new" = "Accepted_name"), relationship = "many-to-many") %>%   
+  left_join(fungalroot, by = c("genus_new" = "Genus"),
+                                           relationship = "many-to-many") %>%  
+  mutate(species_new = species_new,
+         family_new = family_new,
+         carnivory = case_when(carnivory_gift == "non-carnivorous" ~ 0,
+                               carnivory_werner == "No" ~  0,
+                               carnivory_gift == "carnivorous" ~ 1,
+                               carnivory_werner == "Yes" ~ 1,
+                               is.na(carnivory_gift) & is.na(carnivory_werner) ~ NA),
+         parasite = case_when(parasite_gift == "independent" ~ 0,
+                              parasite_gift == "obligatory" | parasite_gift == "facultative" ~ 1,
+                              parasite_werner == "No" ~  0,
+                              parasite_werner == "Yes" ~ 1,
+                              is.na(parasite_gift) & is.na(parasite_werner) ~ NA),
+         nfix = case_when(nfix %in%  c("Frankia","likely_Rhizobia","Rhizobia") ~ 1,# check nodb first
+                          nfix == "None" ~ 0,
+                          nfix_gift == "no" ~ 0, # then gift
+                          nfix_gift == "yes" ~ 1,
+                          nfix_werner == "No" ~  0, # them werner
+                          nfix_werner == "Yes" ~ 1,
+                          is.na(parasite_gift) & is.na(parasite_werner) ~ NA),
+         cluster = if_else(cluster == "Yes", 1, 0),
+         myco_type = case_when(`Mycorrhizal type` %in% c("AM","NM-AM", "NM-AM, rarely EcM", "EcM-AM") ~ "AM",
+                               `Mycorrhizal type` == "OM" ~ "OM",
+                               `Mycorrhizal type` %in% c("NM", "nM","NM-AM", "NM-AM, rarely EcM") ~"NM",
+                               `Mycorrhizal type` %in% c("EcM","EcM-AM") ~ "EcM",
+                               `Mycorrhizal type` == "ErM" ~ "ErM",
+                               is.na(`Mycorrhizal type`) ~ NA),
+         .keep = "none") 
+
+saveRDS(cat_traits,"outputs/harmonized_categorical_traits.rds")
+```
+
+check number of plots with at least 80% of species with trait observations
+```{r}
+npk <- read.csv(paste0(dir,"/Globnut_offline/_GLOBNUT1.0/GlobNut1.0_nutrients.csv"))
+meta <- read.csv(paste0(dir,"Globnut_offline/_GLOBNUT1.0/GlobNut1.0_metadata.csv")) 
+adapt <- read.csv(paste0(dir,"/Globnut_offline/_GLOBNUT1.0/GlobNut1.0_species.csv")) %>% 
+   mutate(species_new = word(species_new, 1,2)) %>% 
+  filter(vascular_plant == 1) %>% 
+  filter(!family_new == "") %>% 
+  filter(!species_new == "") %>% 
+  select(plot_ID, species_new) %>% 
+  distinct() %>% 
+  left_join(cat_traits, by = "species_new") 
+
+spec_cover <- adapt %>% 
+  group_by(plot_ID) %>% 
+  summarise(n_spec= n_distinct(species_new),
+           across(cluster:myco_type, ~sum(!is.na(.))/n_spec)) %>% 
+  select(-n_spec) %>% 
+  pivot_longer(cluster:myco_type, names_to = "trait", values_to = "species_coverage") 
+
+spec_cover %>% 
+  filter(species_coverage > 0.8) %>% 
+  group_by(trait) %>% 
+  summarise(n())
+
+ggplot(spec_cover, aes(x = trait, y = species_coverage)) +
+  geom_boxplot()
+```
+
